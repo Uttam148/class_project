@@ -2,7 +2,7 @@
 
 > Crowdsourced Civic Issue Reporting & Resolution System
 
-## 🚀 Live Demo
+## 🚀 Live Demo click the below link
 
 👉 **[Open CivicConnect](https://class-project-vi2a.onrender.com)**
 
