@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CivicConnect — Civic Issue Reporting & Resolution</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="mark">CC</div>
+      <div>
+        <div class="brand-text">CivicConnect</div>
+        <div class="brand-sub">Crowdsourced Issue Resolution — Live Backend</div>
+      </div>
+    </div>
+    <nav class="tabs">
+      <button data-view="citizen" class="active">Citizen</button>
+      <button data-view="authority">Authority</button>
+      <button data-view="analytics">Analytics</button>
+    </nav>
+  </header>
+
+  <main>
+
+    <!-- ============ CITIZEN VIEW ============ -->
+    <section class="view active" id="view-citizen">
+      <div class="eyebrow">Live API · SQLite-backed</div>
+      <h1 class="page-title">Report a civic issue</h1>
+      <p class="page-desc">Photo/video, GPS location and a short description get classified automatically, checked against existing reports, and routed to the right department. Data is saved to a real database on the server.</p>
+
+      <div class="grid2">
+        <div>
+          <div class="card">
+            <h3>New Report</h3>
+            <label>Photo / video evidence</label>
+            <input type="file" id="fileInput" accept="image/*" style="display:none;">
+            <div class="file-drop" id="fileDrop">📷 Tap to attach photo</div>
+
+            <label>Category</label>
+            <select id="inCategory">
+              <option value="">Let AI detect from description</option>
+            </select>
+
+            <label>Description</label>
+            <textarea id="inDesc" placeholder="e.g. Large pothole near the bus stop, water pooling after rain, becoming dangerous for two-wheelers..."></textarea>
+
+            <div class="row2">
+              <div>
+                <label>Location</label>
+                <button class="btn-locate" id="btnLocate" type="button">📍 Use current location</button>
+                <div class="loc-tag" id="locTag"></div>
+              </div>
+              <div>
+                <label>Ward</label>
+                <select id="inWard"></select>
+              </div>
+            </div>
+
+            <button class="btn-primary" id="btnSubmit">Submit Report</button>
+
+            <div id="pipeline">
+              <div class="pstep" data-step="1"><div class="dot">1</div><div><div class="plabel">AI Classification</div><div class="presult" id="p1res">—</div></div></div>
+              <div class="pstep" data-step="2"><div class="dot">2</div><div><div class="plabel">Duplicate Detection</div><div class="presult" id="p2res">—</div></div></div>
+              <div class="pstep" data-step="3"><div class="dot">3</div><div><div class="plabel">Civic Priority Score</div><div class="presult" id="p3res">—</div></div></div>
+              <div class="pstep" data-step="4"><div class="dot">4</div><div><div class="plabel">Department Routing</div><div class="presult" id="p4res">—</div></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="card">
+            <h3>My Issues &amp; Nearby Reports</h3>
+            <div id="issueFeed"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ AUTHORITY VIEW ============ -->
+    <section class="view" id="view-authority">
+      <div class="eyebrow">Municipal Dashboard</div>
+      <h1 class="page-title">Authority queue</h1>
+      <p class="page-desc">Issues sorted by civic priority score. Update status and close the loop with citizens.</p>
+
+      <div class="filters">
+        <select id="filterDept"><option value="">All Departments</option></select>
+        <select id="filterStatus"><option value="">All Statuses</option></select>
+      </div>
+
+      <div class="card" style="padding:0;">
+        <table>
+          <thead>
+            <tr><th>Issue</th><th>Ward</th><th>Priority</th><th>Department</th><th>Confirms</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody id="authTable"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ ANALYTICS VIEW ============ -->
+    <section class="view" id="view-analytics">
+      <div class="eyebrow">City Intelligence</div>
+      <h1 class="page-title">Analytics dashboard</h1>
+      <p class="page-desc">Ward-wise trends and department performance, computed live from the database.</p>
+
+      <div class="stat-row" id="statRow"></div>
+
+      <div class="grid2">
+        <div class="card">
+          <h3>Issues by Category</h3>
+          <div class="bar-chart" id="catChart"></div>
+        </div>
+        <div class="card">
+          <h3>Hotspot Wards</h3>
+          <div class="ward-list" id="wardList"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h3>Department Performance</h3>
+        <div id="deptPerf"></div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>
