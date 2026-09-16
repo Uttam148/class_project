@@ -1,3 +1,12 @@
+# CivicConnect
+
+> Crowdsourced Civic Issue Reporting & Resolution System
+
+## 🚀 Live Demo
+
+👉 **[Open CivicConnect](https://class-project-vi2a.onrender.com)**
+
+
 # CivicConnect — Crowdsourced Civic Issue Reporting & Resolution System
 
 SIH 2026 MVP. A real full-stack app: Node.js HTTP backend + SQLite database +
