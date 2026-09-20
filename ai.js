@@ -11,7 +11,7 @@ if (!apiKey) {
 const genAI = new GoogleGenerativeAI(apiKey);
 
 const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash"
+    model: "gemini-3.6-flash"
 });
 
 async function analyzeIssueImage(imageBuffer, mimeType) {
@@ -123,10 +123,36 @@ For a non-civic image, use this structure:
   "description": "The image does not show a visible civic or public infrastructure issue."
 }`;
 
-    const result = await model.generateContent([
-        prompt,
-        imagePart
-    ]);
+    let result;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            result = await model.generateContent([
+                prompt,
+                imagePart
+            ]);
+
+            break;
+
+        } catch (error) {
+            const status = error.status;
+
+            if (status === 503 && attempt < 3) {
+                const delay = Math.pow(2, attempt) * 1000;
+
+                console.log(
+                    `Gemini temporarily unavailable. Retrying in ${delay / 1000}s...`
+                );
+
+                await new Promise(resolve =>
+                    setTimeout(resolve, delay)
+                );
+
+            } else {
+                throw error;
+            }
+        }
+    }
 
     const text = result.response.text().trim();
 
