@@ -214,6 +214,180 @@ async function nextIssueCode() {
 
 
 /* =========================================================
+   LOCATION NAME (coordinates → place name)
+========================================================= */
+
+// The citizen's GPS fix is turned into a human-readable place name
+// ("Locality, City") that is stored in the existing `ward` column. Reusing the
+// column means duplicate detection, the ?ward= filter and the Hotspot analytics
+// all keep working with no database migration.
+
+// Public OpenStreetMap Nominatim by default. Its usage policy asks for an
+// identifying User-Agent, at most 1 request per second, and caching of results;
+// all three are handled below. The URL and User-Agent can be overridden from the
+// environment (e.g. to point at another Nominatim-compatible provider).
+const GEOCODER_URL =
+  process.env.GEOCODER_URL || 'https://nominatim.openstreetmap.org/reverse';
+
+const GEOCODER_USER_AGENT =
+  process.env.GEOCODER_USER_AGENT ||
+  'CivicConnect/1.0 (https://class-project-vi2a.onrender.com)';
+
+const GEOCODER_TIMEOUT_MS = 5000;        // give up on a slow lookup; the citizen can type the name instead
+const GEOCODER_MIN_INTERVAL_MS = 1100;   // just over 1 s between outbound calls keeps us inside the 1 req/s policy
+const GEOCODER_MAX_WAIT_MS = 4000;       // if the queue is longer than this, fail fast instead of piling up
+const GEOCODE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const GEOCODE_CACHE_MAX_ENTRIES = 500;   // bounds memory use
+const LOCATION_NAME_MAX_LENGTH = 80;     // also protects us if the `ward` column is a short varchar
+
+// "lat,lng" (rounded) -> { name, expires }. A Map iterates in insertion order,
+// which gives cheap oldest-first eviction.
+const geocodeCache = new Map();
+
+// Epoch ms at which the next outbound geocoder request may be sent.
+let nextGeocoderSlot = 0;
+
+
+// Cleans a place name that came from the browser or from the geocoder.
+// It is later rendered into HTML, so control characters and angle brackets are
+// dropped here as a second line of defence (the frontend escapes it as well).
+function sanitizeLocationName(value) {
+  if (typeof value !== 'string') return '';
+
+  return value
+    .replace(/[\u0000-\u001f\u007f<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, LOCATION_NAME_MAX_LENGTH);
+}
+
+
+// Parses and range-checks a latitude/longitude pair (strings from a query
+// string, or numbers). Returns { lat, lng }, or null if either value is
+// missing, non-numeric or out of range.
+function parseCoordinates(latRaw, lngRaw) {
+  const isBlank = (v) => v === null || v === undefined || v === '';
+
+  // Number(null) and Number('') are both 0, which would silently turn a missing
+  // value into the real coordinate 0,0 - so reject blanks explicitly first.
+  if (isBlank(latRaw) || isBlank(lngRaw)) return null;
+
+  const lat = Number(latRaw);
+  const lng = Number(lngRaw);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+
+  return { lat, lng };
+}
+
+
+// Builds "Locality, City" from a Nominatim result. Address fields differ a lot
+// between places, so take the most local name that exists, then the settlement
+// it belongs to, and skip whatever is missing.
+function pickPlaceName(result) {
+  const address = (result && result.address) || {};
+
+  const locality =
+    address.neighbourhood || address.suburb || address.city_district ||
+    address.quarter || address.hamlet || address.village;
+
+  const settlement =
+    address.city || address.town || address.municipality ||
+    address.county || address.state_district;
+
+  // De-duplicate so a place that is both locality and city doesn't read "Delhi, Delhi".
+  const parts = [locality, settlement].filter(
+    (part, i, all) => part && all.indexOf(part) === i
+  );
+
+  if (parts.length) return parts.join(', ');
+
+  // Last resort: the first two segments of the formatted address.
+  if (result && typeof result.display_name === 'string') {
+    return result.display_name
+      .split(',')
+      .slice(0, 2)
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  return null;
+}
+
+
+// Reserves the next outbound slot so calls are spaced by GEOCODER_MIN_INTERVAL_MS.
+// Returns false (without reserving) when the wait would exceed GEOCODER_MAX_WAIT_MS.
+// Node runs this synchronously, so two callers can never claim the same slot.
+async function waitForGeocoderSlot() {
+  const now = Date.now();
+  const slot = Math.max(now, nextGeocoderSlot);
+
+  if (slot - now > GEOCODER_MAX_WAIT_MS) return false;
+
+  nextGeocoderSlot = slot + GEOCODER_MIN_INTERVAL_MS;
+
+  if (slot > now) {
+    await new Promise((resolve) => setTimeout(resolve, slot - now));
+  }
+
+  return true;
+}
+
+
+// Looks up the place name for a coordinate. Never throws: returns null when the
+// lookup fails, times out, is rate-limited or finds nothing, so the caller can
+// let the citizen type the area instead of blocking the report.
+async function reverseGeocode(lat, lng) {
+  // ~3 decimals is roughly 100 m, plenty for a locality-level name, and it lets
+  // nearby reports share one cached lookup (which the usage policy asks for).
+  const cacheKey = `${lat.toFixed(3)},${lng.toFixed(3)}`;
+
+  const cached = geocodeCache.get(cacheKey);
+  if (cached && cached.expires > Date.now()) return cached.name;
+
+  try {
+    if (!(await waitForGeocoderSlot())) return null;
+
+    const url = new URL(GEOCODER_URL);
+    url.search = new URLSearchParams({
+      format: 'jsonv2',
+      lat: String(lat),
+      lon: String(lng),
+      zoom: '14',              // neighbourhood level: avoids street/building names, which would make the same area look different on every report
+      addressdetails: '1',
+      'accept-language': 'en'
+    }).toString();
+
+    const response = await fetch(url, {
+      headers: { 'User-Agent': GEOCODER_USER_AGENT, Accept: 'application/json' },
+      signal: AbortSignal.timeout(GEOCODER_TIMEOUT_MS)
+    });
+
+    if (!response.ok) {
+      throw new Error(`Geocoder responded with HTTP ${response.status}`);
+    }
+
+    const name = sanitizeLocationName(pickPlaceName(await response.json()));
+    if (!name) return null;
+
+    // Evict the oldest entry once full, then remember this result.
+    if (geocodeCache.size >= GEOCODE_CACHE_MAX_ENTRIES) {
+      geocodeCache.delete(geocodeCache.keys().next().value);
+    }
+    geocodeCache.set(cacheKey, { name, expires: Date.now() + GEOCODE_CACHE_TTL_MS });
+
+    return name;
+
+  } catch (error) {
+    console.error('Reverse geocoding failed:', error.message);
+    return null;
+  }
+}
+
+
+/* =========================================================
    PHOTO → SUPABASE STORAGE
 ========================================================= */
 
@@ -360,9 +534,23 @@ async function createIssue(body) {
   }
 
 
-  const ward =
-    body.ward ||
-    'Ward 14 — Central Zone';
+  // Location: the place name shown in the form. It is auto-filled from the
+  // citizen's coordinates via GET /api/geocode and can be edited or typed by
+  // hand. It is stored in the existing `ward` column so duplicate detection,
+  // filtering and analytics keep working unchanged. `body.ward` is still
+  // accepted so older clients don't break. Checked here, before the photo and
+  // Gemini work, so a missing location doesn't cost an AI call.
+  const ward = sanitizeLocationName(
+    body.location !== undefined ? body.location : body.ward
+  );
+
+  if (!ward) {
+    throw {
+      status: 400,
+      message:
+        'Location is required: use "Use current location" or type the area name.'
+    };
+  }
 
 
   /* -------------------------------------------------------
@@ -1599,18 +1787,39 @@ const server =
                   DEPTS
                 ),
 
-              wards: [
-                'Ward 14 — Central Zone',
-                'Ward 7 — Riverside',
-                'Ward 22 — Sector Hills',
-                'Ward 3 — Old Town'
-              ],
-
               statuses:
                 VALID_STATUSES
 
             }
           );
+        }
+
+
+        /* ---------- GEOCODE (coordinates → place name) ---------- */
+
+        // The form calls this right after the browser captures a GPS fix, so the
+        // citizen sees (and can correct) the area name before submitting.
+        // Responds { name } - name is null when nothing could be resolved.
+        if (
+          pathname === '/api/geocode' &&
+          req.method === 'GET'
+        ) {
+
+          const coords = parseCoordinates(
+            url.searchParams.get('lat'),
+            url.searchParams.get('lng')
+          );
+
+          if (!coords) {
+            throw {
+              status: 400,
+              message: 'Valid "lat" and "lng" query parameters are required.'
+            };
+          }
+
+          const name = await reverseGeocode(coords.lat, coords.lng);
+
+          return sendJSON(res, 200, { name });
         }
 
 

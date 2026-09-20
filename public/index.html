@@ -55,8 +55,11 @@
                 <div class="loc-tag" id="locTag"></div>
               </div>
               <div>
-                <label>Ward</label>
-                <select id="inWard"></select>
+                <label for="inLocation">Area name</label>
+                <!-- Filled automatically with the place the GPS coordinates point to (see app.js lookUpAreaName).
+                     Editable, and the fallback when location access is unavailable: type the area by hand. -->
+                <input type="text" id="inLocation" maxlength="80" autocomplete="off"
+                       placeholder="Filled from your location, or type it">
               </div>
             </div>
 
@@ -94,7 +97,7 @@
       <div class="card" style="padding:0;">
         <table>
           <thead>
-            <tr><th>Issue</th><th>Ward</th><th>Priority</th><th>Department</th><th>Confirms</th><th>Status</th><th></th></tr>
+            <tr><th>Issue</th><th>Location</th><th>Priority</th><th>Department</th><th>Confirms</th><th>Status</th><th></th></tr>
           </thead>
           <tbody id="authTable"></tbody>
         </table>
@@ -105,7 +108,7 @@
     <section class="view" id="view-analytics">
       <div class="eyebrow">City Intelligence</div>
       <h1 class="page-title">Analytics dashboard</h1>
-      <p class="page-desc">Ward-wise trends and department performance, computed live from the database.</p>
+      <p class="page-desc">Location-wise trends and department performance, computed live from the database.</p>
 
       <div class="stat-row" id="statRow"></div>
 
@@ -115,7 +118,7 @@
           <div class="bar-chart" id="catChart"></div>
         </div>
         <div class="card">
-          <h3>Hotspot Wards</h3>
+          <h3>Hotspot Areas</h3>
           <div class="ward-list" id="wardList"></div>
         </div>
       </div>

@@ -3,7 +3,7 @@
 const TRACK_STEPS = ['reported', 'ai_verified', 'assigned', 'in_progress', 'resolved'];
 const TRACK_LABELS = { reported: 'Reported', ai_verified: 'AI Verified', assigned: 'Assigned', in_progress: 'In Progress', resolved: 'Resolved' };
 
-let META = { departments: [], categories: [], wards: [], statuses: [] };
+let META = { departments: [], categories: [], statuses: [] };
 let currentPhotoDataUrl = null;
 
 // Persistent per-browser voter id so a citizen can't confirm the same issue twice
@@ -50,8 +50,6 @@ async function loadMeta() {
   META = await api('/api/meta');
   const catSel = document.getElementById('inCategory');
   META.categories.forEach((c) => catSel.insertAdjacentHTML('beforeend', `<option>${c}</option>`));
-  const wardSel = document.getElementById('inWard');
-  META.wards.forEach((w) => wardSel.insertAdjacentHTML('beforeend', `<option>${w}</option>`));
   const filterDept = document.getElementById('filterDept');
   META.departments.forEach((d) => filterDept.insertAdjacentHTML('beforeend', `<option>${d}</option>`));
   const filterStatus = document.getElementById('filterStatus');
@@ -74,27 +72,152 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
 });
 
 /* ---------------- Locate ---------------- */
+
+// Formats a signed decimal-degree value with the correct compass letter.
+// Why: the old code hard-coded "N" and "E", which mislabels every position in
+// the southern or western hemisphere. The sign of the number already says which
+// side of the equator / prime meridian we are on, so derive the letter from it.
+// 5 decimals is roughly 1 m, about the finest detail a GPS fix can resolve.
+function formatCoord(value, positiveLetter, negativeLetter) {
+  const letter = value >= 0 ? positiveLetter : negativeLetter;
+  return `${Math.abs(value).toFixed(5)}° ${letter}`;
+}
+
+// Turns a GeolocationPositionError into a message the citizen can act on.
+// Why: previously every failure silently displayed a made-up "captured"
+// coordinate, so a report could look located when it was not. Telling the truth
+// about why the fix failed lets the user remove the cause (permission, GPS off,
+// weak signal) instead of submitting with a fake location.
+function describeLocationError(err) {
+  switch (err.code) {
+    case err.PERMISSION_DENIED:
+      return 'Location access is blocked. Allow it for this site in your browser settings, then try again.';
+    case err.POSITION_UNAVAILABLE:
+      return 'Your device could not work out its position. Turn on GPS / location services and try again.';
+    case err.TIMEOUT:
+      return 'Getting your location took too long. Try again, ideally with a clear view of the sky.';
+    default:
+      return 'Could not get your location. Please try again.';
+  }
+}
+
+// Shows a failure in the location tag.
+// Why: the tag's stylesheet colour (green) means "success" in this UI, so a
+// failure is switched to the theme's error colour (--clay); otherwise an error
+// message would look like a successful capture.
+function showLocationError(tag, message) {
+  tag.style.color = 'var(--clay)';
+  tag.textContent = `⚠️ ${message}`;
+}
+
+// Default hint shown in the empty location field; restored after each report.
+const LOCATION_PLACEHOLDER = 'Filled from your location, or type it';
+
+// Identifies the newest lookup. A slow answer for an older fix must not
+// overwrite the result of a newer one, so every response checks it is still current.
+let areaLookupId = 0;
+
+// Asks the server which place the coordinates point to and puts the answer in
+// the editable location field. The server does the lookup (not the browser) so
+// the geocoder's rate limit, caching and User-Agent policy are enforced in one place.
+async function lookUpAreaName(latitude, longitude) {
+  const input = document.getElementById('inLocation');
+  const lookupId = ++areaLookupId;
+
+  // Drop the previous name: it belongs to an earlier position and would be wrong
+  // if this lookup fails. (This only runs after a successful GPS fix, so a denied
+  // permission never wipes what the citizen typed.)
+  input.value = '';
+  input.placeholder = 'Looking up area name…';
+
+  try {
+    const { name } = await api(`/api/geocode?lat=${latitude}&lng=${longitude}`);
+    if (lookupId !== areaLookupId) return; // superseded by a newer click
+
+    if (name) {
+      input.value = name;
+      input.placeholder = LOCATION_PLACEHOLDER;
+      return;
+    }
+  } catch (err) {
+    if (lookupId !== areaLookupId) return;
+  }
+
+  // No name (nothing found, geocoder down, or the request failed): say so and let
+  // the citizen type it rather than blocking the report.
+  input.placeholder = 'Type the area name';
+  showToast('Could not find the area name for your location. Please type it.');
+}
+
+// Clears the location UI after a report is sent so the next report cannot
+// accidentally reuse a place the citizen has since left.
+function resetLocationFields() {
+  areaLookupId++; // cancel any lookup still in flight
+
+  const input = document.getElementById('inLocation');
+  input.value = '';
+  input.placeholder = LOCATION_PLACEHOLDER;
+
+  const tag = document.getElementById('locTag');
+  tag.style.display = 'none';
+  tag.style.color = '';
+  tag.textContent = '';
+}
+
 document.getElementById('btnLocate').addEventListener('click', function () {
   const tag = document.getElementById('locTag');
   tag.style.display = 'block';
+  tag.style.color = ''; // clear the error colour left behind by a previous failed attempt
+  areaLookupId++;       // a new attempt makes any lookup still running for the old fix obsolete
+  // If that abandoned lookup was mid-flight the field may still say "Looking up…" and nobody
+  // will update it any more, so put the normal hint back (a successful new fix replaces it again).
+  document.getElementById('inLocation').placeholder = LOCATION_PLACEHOLDER;
   tag.textContent = 'Locating…';
-  if (navigator.geolocation) {
-    navigator.geolocation.getCurrentPosition(
-      (pos) => { tag.textContent = `📍 Captured: ${pos.coords.latitude.toFixed(4)}° N, ${pos.coords.longitude.toFixed(4)}° E (±${Math.round(pos.coords.accuracy)}m)`; },
-      () => { tag.textContent = '📍 Captured: 28.6692° N, 77.4538° E (±6m)'; },
-      { timeout: 4000 }
-    );
-  } else {
-    tag.textContent = '📍 Captured: 28.6692° N, 77.4538° E (±6m)';
+
+  // Browsers only expose geolocation on secure origins (HTTPS or localhost).
+  // On plain http:// (for example, testing from a phone via the PC's LAN
+  // address) the request is refused with a misleading "permission denied", so
+  // detect it up front and give the real reason.
+  if (!window.isSecureContext) {
+    showLocationError(tag, 'Location needs a secure connection (HTTPS or localhost). Open the site over HTTPS.');
+    return;
   }
+
+  // Very old browsers have no Geolocation API at all.
+  if (!navigator.geolocation) {
+    showLocationError(tag, 'This browser does not support location access.');
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    // Success: display the fix exactly as the device reported it.
+    (pos) => {
+      const { latitude, longitude, accuracy } = pos.coords;
+      tag.textContent = `📍 Captured: ${formatCoord(latitude, 'N', 'S')}, ${formatCoord(longitude, 'E', 'W')} (±${Math.round(accuracy)}m)`;
+      lookUpAreaName(latitude, longitude); // fills the editable area-name field
+    },
+    // Failure: report why it failed; never substitute a stored coordinate.
+    (err) => showLocationError(tag, describeLocationError(err)),
+    {
+      enableHighAccuracy: true, // ask for GPS rather than a coarse Wi-Fi/IP-based guess
+      timeout: 15000,           // a GPS cold start can exceed the old 4 s limit, which used to trigger the fake fallback
+      maximumAge: 0             // never reuse a cached position; we want where the user is right now
+    }
+  );
 });
 
 /* ---------------- Submit ---------------- */
 document.getElementById('btnSubmit').addEventListener('click', async () => {
   const description = document.getElementById('inDesc').value.trim();
   const category = document.getElementById('inCategory').value;
-  const ward = document.getElementById('inWard').value;
+  const locationName = document.getElementById('inLocation').value.trim();
   if (!description) { showToast('Please describe the issue first.'); return; }
+  // A report without a place cannot be acted on, so require one (auto-filled from the GPS fix, or typed).
+  if (!locationName) {
+    showToast('Please tap "Use current location" or type the area name.');
+    document.getElementById('inLocation').focus();
+    return;
+  }
 
   const btn = document.getElementById('btnSubmit');
   btn.disabled = true; btn.textContent = 'Processing…';
@@ -106,7 +229,7 @@ document.getElementById('btnSubmit').addEventListener('click', async () => {
   try {
     const result = await api('/api/issues', {
       method: 'POST',
-      body: JSON.stringify({ description, category, ward, photo: currentPhotoDataUrl, voterId: getVoterId() }),
+      body: JSON.stringify({ description, category, location: locationName, photo: currentPhotoDataUrl, voterId: getVoterId() }),
     });
 
     await animateStep(1, result.pipeline.classification);
@@ -123,6 +246,7 @@ document.getElementById('btnSubmit').addEventListener('click', async () => {
     drop.classList.remove('has-file');
     drop.innerHTML = '📷 Tap to attach photo';
     document.getElementById('fileInput').value = '';
+    resetLocationFields();
 
     await renderFeed();
   } catch (err) {
@@ -161,7 +285,7 @@ async function renderFeed() {
       <div class="issue-top">
         <div>
           <div class="issue-cat">${issue.category}</div>
-          <div class="issue-id">${issue.id} · ${issue.ward}</div>
+          <div class="issue-id">${issue.id} · ${escapeHtml(issue.ward)}</div>
         </div>
         <span class="stamp ${issue.status}">${TRACK_LABELS[issue.status]}</span>
       </div>
@@ -194,7 +318,7 @@ async function renderFeed() {
 }
 
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+  return String(s ?? '').replace(/[&<>"']/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
 
 /* ---------------- Authority table ---------------- */
@@ -215,7 +339,7 @@ async function renderAuthority() {
         <div style="font-weight:600;color:var(--ink);">${issue.category}</div>
         <div class="mono" style="font-size:11px;color:var(--text-dim);">${issue.id}</div>
       </td>
-      <td>${issue.ward.split(' — ')[0]}</td>
+      <td>${escapeHtml(issue.ward)}</td>
       <td><span class="mono" style="font-weight:600;color:${issue.priority >= 75 ? 'var(--clay)' : issue.priority >= 45 ? 'var(--amber)' : 'var(--green)'}">${issue.priority}</span></td>
       <td><span class="dept-pill">${issue.department}</span></td>
       <td class="mono">${issue.confirms}</td>
@@ -262,7 +386,7 @@ async function renderAnalytics() {
     </div>`).join('');
 
   document.getElementById('wardList').innerHTML = a.wards.length ? a.wards.map((w) => `
-    <div class="ward-item"><span class="wname">${w.ward}</span><span class="wcount">${w.count} issue${w.count > 1 ? 's' : ''}</span></div>
+    <div class="ward-item"><span class="wname">${escapeHtml(w.ward)}</span><span class="wcount">${w.count} issue${w.count > 1 ? 's' : ''}</span></div>
   `).join('') : '<div class="empty">No data yet.</div>';
 
   const deptEntries = Object.entries(a.byDept);
