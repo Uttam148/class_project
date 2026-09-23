@@ -518,7 +518,7 @@ async function listIssues(query) {
    CREATE ISSUE + GEMINI AI
 ========================================================= */
 
-async function createIssue(body) {
+async function createIssue(body, user) {
 
   const description =
     (body.description || '').trim();
@@ -838,9 +838,9 @@ async function createIssue(body) {
 
   if (duplicate) {
 
-    const voterId =
-      body.voterId ||
-      crypto.randomUUID();
+    // The voter is the signed-in account, never a client-supplied id, so nobody can
+    // confirm the same issue repeatedly by inventing new ids.
+    const voterId = user.id;
 
 
     let confirmed = false;
@@ -1020,6 +1020,10 @@ async function createIssue(body) {
       ai_confidence:
         confidence,
 
+      // Who filed the report (accountability and spam tracing). Never returned by the API.
+      reporter_id:
+        user.id,
+
       created_at:
         now,
 
@@ -1067,7 +1071,7 @@ async function createIssue(body) {
 
 async function confirmIssue(
   issueCode,
-  body
+  user
 ) {
 
   const {
@@ -1093,9 +1097,9 @@ async function confirmIssue(
   }
 
 
-  const voterId =
-    body.voterId ||
-    crypto.randomUUID();
+  // The voter is the signed-in account, never a client-supplied id, so nobody can
+  // confirm the same issue repeatedly by inventing new ids.
+  const voterId = user.id;
 
 
   const now =
@@ -1569,6 +1573,107 @@ function serveStatic(
 
 
 /* =========================================================
+   AUTHENTICATION (Supabase Auth)
+========================================================= */
+
+// Accounts live in Supabase Auth. The browser signs people in directly using the
+// *publishable* key (designed to be public; it can only do what Row Level
+// Security allows) and then sends the resulting access token with each API call:
+//     Authorization: Bearer <access token>
+// This server never trusts anything the browser claims about the user. It asks
+// Supabase Auth to validate the token and reads identity, email verification and
+// role from Supabase's answer.
+
+const SUPABASE_PUBLISHABLE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || '';
+
+if (!SUPABASE_PUBLISHABLE_KEY) {
+  console.warn(
+    'SUPABASE_PUBLISHABLE_KEY is not set, so nobody can sign in yet. ' +
+    'See README, "Accounts and sign-in".'
+  );
+}
+
+// The browser build of the Supabase client. It is served from node_modules (the
+// package is already installed for this server) so the browser and the server use
+// the same version and there is no third-party CDN to depend on.
+const SUPABASE_BROWSER_BUNDLE = path.join(
+  __dirname, 'node_modules', '@supabase', 'supabase-js', 'dist', 'umd', 'supabase.js'
+);
+
+function serveSupabaseBundle(res) {
+  fs.readFile(SUPABASE_BROWSER_BUNDLE, (error, data) => {
+    if (error) {
+      return sendJSON(res, 404, { error: 'Supabase browser bundle not found. Run "npm install".' });
+    }
+
+    send(res, 200, data, {
+      'Content-Type': 'application/javascript',
+      'Cache-Control': 'public, max-age=86400'
+    });
+  });
+}
+
+
+// Validates the request's bearer token and returns who is calling:
+//   { id, email, role: 'citizen' | 'authority', emailVerified: true }
+// Throws 401 (no/invalid/expired token), 403 (email not verified) or 503
+// (Supabase Auth unreachable). What the caller may DO is decided by the route.
+async function authenticate(req) {
+  const match = /^Bearer\s+(\S+)\s*$/i.exec(req.headers['authorization'] || '');
+
+  if (!match) {
+    throw { status: 401, message: 'Sign in to continue.' };
+  }
+
+  const { data, error } = await supabase.auth.getUser(match[1]);
+
+  if (error || !data || !data.user) {
+    // 4xx from Supabase means the token itself is bad. Anything else (network
+    // failure, 5xx) is not the caller's fault; answering 503 instead of 401 keeps
+    // the browser from signing someone out just because Supabase had a bad moment.
+    const tokenRejected = error && error.status >= 400 && error.status < 500;
+
+    throw tokenRejected || !error
+      ? { status: 401, message: 'Your session has expired. Please sign in again.' }
+      : { status: 503, message: 'The sign-in service is unavailable right now. Please try again in a moment.' };
+  }
+
+  const user = data.user;
+
+  // Supabase sets email_confirmed_at only after the person opened the link that
+  // was emailed to them, which is what proves they control the address. It is
+  // checked here as well as in the Supabase dashboard so "verified" cannot be
+  // skipped by calling the API directly.
+  if (!user.email_confirmed_at) {
+    throw {
+      status: 403,
+      code: 'EMAIL_NOT_VERIFIED',
+      message: 'Verify your email address first: open the link we emailed you, then sign in again.'
+    };
+  }
+
+  // Roles live in app_metadata, which only the project owner can edit. (Do NOT
+  // use user_metadata for this: signed-in users can change their own.)
+  const role = user.app_metadata && user.app_metadata.role === 'authority'
+    ? 'authority'
+    : 'citizen';
+
+  return { id: user.id, email: user.email, role, emailVerified: true };
+}
+
+
+// Guards actions that only city staff may perform.
+function requireAuthority(user) {
+  if (user.role !== 'authority') {
+    throw {
+      status: 403,
+      message: "Only authority accounts can change an issue's status."
+    };
+  }
+}
+
+
+/* =========================================================
    ROUTER
 ========================================================= */
 
@@ -1604,7 +1709,7 @@ const server =
               'GET,POST,PATCH,OPTIONS',
 
             'Access-Control-Allow-Headers':
-              'Content-Type'
+              'Content-Type, Authorization'
           }
         );
       }
@@ -1650,14 +1755,12 @@ const server =
             'POST'
         ) {
 
-          const body =
-            await readJSON(req);
+          // Signed-in, email-verified accounts only (401/403 otherwise).
+          const user = await authenticate(req);
 
+          const body = await readJSON(req);
 
-          const result =
-            await createIssue(
-              body
-            );
+          const result = await createIssue(body, user);
 
 
           return sendJSON(
@@ -1682,17 +1785,12 @@ const server =
             'POST'
         ) {
 
-          const body =
-            await readJSON(req);
+          const user = await authenticate(req);
 
-
-          const result =
-            await confirmIssue(
-              decodeURIComponent(
-                confirmMatch[1]
-              ),
-              body
-            );
+          const result = await confirmIssue(
+            decodeURIComponent(confirmMatch[1]),
+            user
+          );
 
 
           return sendJSON(
@@ -1717,12 +1815,13 @@ const server =
             'PATCH'
         ) {
 
-          const body =
-            await readJSON(req);
+          // Only authority accounts may move an issue through the workflow.
+          const user = await authenticate(req);
+          requireAuthority(user);
 
+          const body = await readJSON(req);
 
-          const result =
-            await updateStatus(
+          const result = await updateStatus(
               decodeURIComponent(
                 statusMatch[1]
               ),
@@ -1805,6 +1904,10 @@ const server =
           req.method === 'GET'
         ) {
 
+          // Sign-in required: every lookup costs an outbound geocoder call, so anonymous
+          // visitors must not be able to trigger them.
+          await authenticate(req);
+
           const coords = parseCoordinates(
             url.searchParams.get('lat'),
             url.searchParams.get('lng')
@@ -1820,6 +1923,40 @@ const server =
           const name = await reverseGeocode(coords.lat, coords.lng);
 
           return sendJSON(res, 200, { name });
+        }
+
+
+        /* ---------- CONFIG (public, browser-safe values only) ---------- */
+
+        // The browser needs the project URL and the publishable key to sign
+        // people in. Both are meant to be public; the SECRET key never leaves the server.
+        if (
+          pathname === '/api/config' &&
+          req.method === 'GET'
+        ) {
+
+          return send(
+            res,
+            200,
+            JSON.stringify({
+              supabaseUrl: process.env.SUPABASE_URL || null,
+              supabasePublishableKey: SUPABASE_PUBLISHABLE_KEY || null
+            }),
+            {
+              'Content-Type': 'application/json',
+              'Cache-Control': 'no-store'
+            }
+          );
+        }
+
+
+        /* ---------- SUPABASE BROWSER BUNDLE ---------- */
+
+        if (
+          pathname === '/vendor/supabase.js' &&
+          req.method === 'GET'
+        ) {
+          return serveSupabaseBundle(res);
         }
 
 
@@ -1867,6 +2004,12 @@ const server =
             error:
               error.message ||
               'Internal server error',
+
+            // Only errors we threw ourselves (they carry a status) expose a code; raw
+            // database errors have their own codes that should stay server-side.
+            ...(error.status && typeof error.code === 'string'
+              ? { code: error.code }
+              : {}),
 
             ...(error.aiResult
               ? {

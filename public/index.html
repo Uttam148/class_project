@@ -17,11 +17,15 @@
         <div class="brand-sub">Crowdsourced Issue Resolution — Live Backend</div>
       </div>
     </div>
-    <nav class="tabs">
-      <button data-view="citizen" class="active">Citizen</button>
-      <button data-view="authority">Authority</button>
-      <button data-view="analytics">Analytics</button>
-    </nav>
+    <div class="topbar-right">
+      <nav class="tabs">
+        <button data-view="citizen" class="active">Citizen</button>
+        <button data-view="authority" id="tabAuthority" hidden>Authority</button>
+        <button data-view="analytics">Analytics</button>
+      </nav>
+      <!-- Sign in button, or the signed-in email, role and Sign out (built by auth.js) -->
+      <div class="account" id="accountArea"></div>
+    </div>
   </header>
 
   <main>
@@ -34,7 +38,14 @@
 
       <div class="grid2">
         <div>
-          <div class="card">
+          <!-- Shown instead of the form until the visitor is signed in with a verified email (app.js applyAuthState) -->
+          <div class="card gate" id="reportGate">
+            <h3 id="gateTitle">Sign in to report an issue</h3>
+            <p class="auth-note" id="gateText">Anyone can browse reports and analytics. Reporting or confirming an issue needs an account with a verified email, which keeps reports genuine.</p>
+            <button type="button" class="btn-primary" id="gateButton" data-auth="signin">Sign in or create account</button>
+          </div>
+
+          <div class="card" id="reportCard" hidden>
             <h3>New Report</h3>
             <label>Photo / video evidence</label>
             <input type="file" id="fileInput" accept="image/*" style="display:none;">
@@ -80,6 +91,61 @@
             <div id="issueFeed"></div>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- ============ ACCOUNT VIEW ============ -->
+    <!-- Driven by auth.js: exactly one of the four panels below is visible at a time. -->
+    <section class="view" id="view-auth">
+      <div class="eyebrow">Your account</div>
+      <h1 class="page-title" id="authTitle">Sign in</h1>
+      <p class="page-desc" id="authDesc"></p>
+
+      <div class="card auth-card">
+
+        <!-- Panel: sign-in is not configured on this server -->
+        <div id="authUnavailable" hidden>
+          <p class="auth-note">Sign-in isn't available right now. You can still browse reports and analytics.</p>
+        </div>
+
+        <!-- Panel: sign in / create account / reset password / choose new password.
+             novalidate: auth.js validates and words the errors itself, so they look the same everywhere. -->
+        <form id="authForm" novalidate>
+          <div id="authEmailRow">
+            <label for="authEmail">Email</label>
+            <input type="email" id="authEmail" autocomplete="email" inputmode="email" maxlength="254">
+          </div>
+          <div id="authPasswordRow">
+            <label for="authPassword" id="authPasswordLabel">Password</label>
+            <input type="password" id="authPassword" autocomplete="current-password" maxlength="128">
+          </div>
+          <button class="btn-primary" id="authSubmit" type="submit">Sign in</button>
+          <div class="auth-links">
+            <button type="button" class="link-btn" id="linkSignup" data-auth="to-signup">Create an account</button>
+            <button type="button" class="link-btn" id="linkForgot" data-auth="to-forgot">Forgot your password?</button>
+            <button type="button" class="link-btn" id="linkSignin" data-auth="to-signin" hidden>Back to sign in</button>
+          </div>
+        </form>
+
+        <!-- Panel: waiting for the emailed verification link -->
+        <div id="authVerify" hidden>
+          <h3>Check your inbox</h3>
+          <p class="auth-note">We sent a verification link to <strong id="verifyEmail"></strong>. Open it on this device to finish. The email can take a minute to arrive; check your spam folder too.</p>
+          <button type="button" class="btn-locate" id="btnResend" data-auth="resend">Resend verification email</button>
+          <div class="auth-links">
+            <button type="button" class="link-btn" data-auth="to-signin">Back to sign in</button>
+          </div>
+        </div>
+
+        <!-- Panel: already signed in -->
+        <div id="authSignedIn" hidden>
+          <p class="auth-note">You're signed in as <strong id="signedInEmail"></strong> (<span id="signedInRole"></span>).</p>
+          <button type="button" class="btn-locate" data-auth="done">Go to reports</button>
+          <button type="button" class="btn-locate" data-auth="signout">Sign out</button>
+        </div>
+
+        <!-- Result of the last action; announced to screen readers -->
+        <div class="auth-msg" id="authMsg" role="status" aria-live="polite"></div>
       </div>
     </section>
 
@@ -133,6 +199,8 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<script src="/vendor/supabase.js"></script>
+<script src="/auth.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

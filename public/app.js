@@ -6,44 +6,104 @@ const TRACK_LABELS = { reported: 'Reported', ai_verified: 'AI Verified', assigne
 let META = { departments: [], categories: [], statuses: [] };
 let currentPhotoDataUrl = null;
 
-// Persistent per-browser voter id so a citizen can't confirm the same issue twice
-function getVoterId() {
-  let id = localStorage.getItem('civicconnect_voter_id');
-  if (!id) {
-    id = 'voter-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    localStorage.setItem('civicconnect_voter_id', id);
-  }
-  return id;
+// Which issues the signed-in account has already confirmed, remembered so the
+// button can show "Confirmed". Stored per ACCOUNT (not per browser) so two people
+// sharing a computer don't see each other's confirmations. It is only a display
+// aid: the server is the authority and answers 409 for a repeat confirmation.
+function confirmedKey() {
+  return 'civicconnect_confirmed:' + (Auth.userId() || 'anonymous');
 }
 function getConfirmedSet() {
-  try { return new Set(JSON.parse(localStorage.getItem('civicconnect_confirmed') || '[]')); }
+  try { return new Set(JSON.parse(localStorage.getItem(confirmedKey()) || '[]')); }
   catch { return new Set(); }
 }
 function addConfirmed(issueId) {
   const s = getConfirmedSet(); s.add(issueId);
-  localStorage.setItem('civicconnect_confirmed', JSON.stringify([...s]));
+  localStorage.setItem(confirmedKey(), JSON.stringify([...s]));
 }
 
 async function api(path, opts = {}) {
+  // Send the signed-in account's access token when there is one. Public routes
+  // ignore it; protected routes require it (the server decides, not this file).
+  const token = await Auth.getAccessToken();
+
   const res = await fetch(path, {
     ...opts,
-    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(opts.headers || {}),
+    },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+
+  if (!res.ok) {
+    // The server rejected a token we sent (session revoked or account removed):
+    // drop the dead session so the page stops offering signed-in actions.
+    if (res.status === 401 && token) Auth.expireSession();
+
+    const error = new Error(data.error || 'Request failed');
+    error.status = res.status; // lets callers react to e.g. 409 (already confirmed)
+    error.code = data.code;
+    throw error;
+  }
   return data;
 }
 
 /* ---------------- Init / view switching ---------------- */
+function currentView() {
+  const active = document.querySelector('.view.active');
+  return active ? active.id.replace('view-', '') : null;
+}
+
+// Shows one view: a tab name (citizen, authority, analytics) or 'auth', the
+// account view, which has no tab of its own.
+function showView(view) {
+  document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
+  document.getElementById('view-' + view).classList.add('active');
+  if (view === 'authority') renderAuthority();
+  if (view === 'analytics') renderAnalytics();
+}
+
 document.querySelectorAll('nav.tabs button').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.remove('active'));
-    btn.classList.add('active');
-    document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
-    document.getElementById('view-' + btn.dataset.view).classList.add('active');
-    if (btn.dataset.view === 'authority') renderAuthority();
-    if (btn.dataset.view === 'analytics') renderAnalytics();
-  });
+  btn.addEventListener('click', () => showView(btn.dataset.view));
+});
+
+/* ---------------- Accounts ---------------- */
+// auth.js owns the sign-in forms and the session; this adapts the rest of the page
+// to whoever is signed in. The server still enforces every rule, so hiding things
+// here is a convenience, never protection.
+function applyAuthState() {
+  const verified = Auth.isVerified();
+
+  // Only verified accounts see the report form; everyone else sees why, and how to get in.
+  document.getElementById('reportCard').hidden = !verified;
+  document.getElementById('reportGate').hidden = verified;
+
+  const signedInUnverified = Auth.isSignedIn() && !verified;
+  document.getElementById('gateTitle').textContent =
+    signedInUnverified ? 'Verify your email to report issues' : 'Sign in to report an issue';
+  document.getElementById('gateText').textContent = signedInUnverified
+    ? `We sent a verification link to ${Auth.email()}. Open it, then come back here.`
+    : 'Anyone can browse reports and analytics. Reporting or confirming an issue needs an account with a verified email, which keeps reports genuine.';
+  document.getElementById('gateButton').textContent =
+    signedInUnverified ? 'Verify your email' : 'Sign in or create account';
+
+  // The authority queue is for authority accounts only.
+  const isAuthority = Auth.isAuthority();
+  document.getElementById('tabAuthority').hidden = !isAuthority;
+  if (!isAuthority && currentView() === 'authority') showView('citizen');
+}
+
+// What the feed shows (e.g. "Confirmed") depends on the account, so reload it when the account changes.
+let feedUserId = null;
+Auth.onChange(() => {
+  applyAuthState();
+  if (Auth.userId() !== feedUserId) {
+    feedUserId = Auth.userId();
+    renderFeed();
+  }
 });
 
 async function loadMeta() {
@@ -139,7 +199,7 @@ async function lookUpAreaName(latitude, longitude) {
       input.placeholder = LOCATION_PLACEHOLDER;
       return;
     }
-  } catch (err) {
+  } catch {
     if (lookupId !== areaLookupId) return;
   }
 
@@ -208,6 +268,13 @@ document.getElementById('btnLocate').addEventListener('click', function () {
 
 /* ---------------- Submit ---------------- */
 document.getElementById('btnSubmit').addEventListener('click', async () => {
+  // The form is hidden from anyone who isn't verified, but check again in case the session ended while the page stayed open.
+  if (!Auth.isVerified()) {
+    showToast('Sign in with a verified email to report an issue.');
+    Auth.openSignIn();
+    return;
+  }
+
   const description = document.getElementById('inDesc').value.trim();
   const category = document.getElementById('inCategory').value;
   const locationName = document.getElementById('inLocation').value.trim();
@@ -229,7 +296,7 @@ document.getElementById('btnSubmit').addEventListener('click', async () => {
   try {
     const result = await api('/api/issues', {
       method: 'POST',
-      body: JSON.stringify({ description, category, location: locationName, photo: currentPhotoDataUrl, voterId: getVoterId() }),
+      body: JSON.stringify({ description, category, location: locationName, photo: currentPhotoDataUrl }),
     });
 
     await animateStep(1, result.pipeline.classification);
@@ -305,14 +372,23 @@ async function renderFeed() {
 
   el.querySelectorAll('.upvote:not(.voted)').forEach((btn) => {
     btn.addEventListener('click', async () => {
+      // Confirming needs an account (one vote per verified person). Offer to sign in instead of failing.
+      if (!Auth.isVerified()) {
+        showToast('Sign in with a verified email to confirm an issue.');
+        Auth.openSignIn();
+        return;
+      }
       try {
-        const updated = await api(`/api/issues/${encodeURIComponent(btn.dataset.id)}/confirm`, {
-          method: 'POST', body: JSON.stringify({ voterId: getVoterId() }),
-        });
+        const updated = await api(`/api/issues/${encodeURIComponent(btn.dataset.id)}/confirm`, { method: 'POST' });
         addConfirmed(updated.id);
         showToast(`Confirmed ${updated.id} — priority recalculated to ${updated.priority}.`);
         renderFeed();
-      } catch (err) { showToast(err.message); }
+      } catch (err) {
+        // 409: this account already confirmed it (perhaps from another device). Remember
+        // that so the button shows "Confirmed" instead of inviting another try.
+        if (err.status === 409) { addConfirmed(btn.dataset.id); renderFeed(); }
+        showToast(err.message);
+      }
     });
   });
 }
@@ -360,7 +436,10 @@ async function renderAuthority() {
         });
         showToast(`${updated.id} marked as "${TRACK_LABELS[updated.status]}"${updated.status === 'resolved' ? ' — awaiting citizen verification.' : ''}`);
         renderAuthority();
-      } catch (err) { showToast(err.message); }
+      } catch (err) {
+        showToast(err.message);
+        renderAuthority(); // the dropdown already shows the new value; restore the real one
+      }
     });
   });
 }
@@ -412,6 +491,17 @@ function showToast(msg) {
 
 /* ---------------- Boot ---------------- */
 (async function init() {
+  // Accounts first: whether the report form or the sign-in gate is shown, and
+  // which issues count as "Confirmed", depend on who is signed in.
+  await Auth.init({
+    openAuthView: () => showView('auth'),
+    // Leave the account view only if that is where the person is (an emailed link can complete a sign-in from anywhere).
+    closeAuthView: () => { if (currentView() === 'auth') showView('citizen'); },
+    toast: showToast,
+  });
+  feedUserId = Auth.userId();
+  applyAuthState();
+
   await loadMeta();
   await renderFeed();
 })();
