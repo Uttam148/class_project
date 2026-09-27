@@ -494,12 +494,21 @@ async function saveBase64Photo(dataUrl) {
    LIST ISSUES
 ========================================================= */
 
-async function listIssues(query) {
+async function listIssues(query, userId) {
 
   let request =
     supabase
       .from('issues')
       .select('*');
+
+  if (query.mine === 'true') {
+
+    request =
+      request.eq(
+        'reporter_id',
+        userId
+      );
+  }
 
   if (query.department) {
 
@@ -1017,8 +1026,8 @@ async function createIssue(body, userId) {
       issue_code:
         issueCode,
 
-        reporter_id:
-          userId,
+      reporter_id:
+        userId,
 
       category:
         category,
@@ -1652,10 +1661,28 @@ const server =
               url.searchParams
             );
 
+          let userId = null;
+
+          if (query.mine === 'true') {
+
+            const user =
+              await getAuthenticatedUser(req);
+
+            if (!user) {
+              throw {
+                status: 401,
+                message: 'Please log in to view your reports.'
+              };
+            }
+
+            userId = user.id;
+          }
+
 
           const result =
             await listIssues(
-              query
+              query,
+              userId
             );
 
 

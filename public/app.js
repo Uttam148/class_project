@@ -26,9 +26,13 @@ async function initAuth() {
     currentSession = session;
     renderAuthArea();
     closeAuthModal();
-    // Re-render the feed so "Confirm" buttons reflect the now-current user
-    // (a different user may have confirmed different issues on this browser).
+    // Re-render feeds so they reflect the now-current user
+    // (a different user may have confirmed different issues on this browser,
+    // and "My Reports" must always show the currently logged-in user's own reports).
     renderFeed();
+    if (document.getElementById('view-myreports').classList.contains('active')) {
+      renderMyReports();
+    }
   });
 }
 
@@ -113,9 +117,9 @@ document.getElementById('authSubmit').addEventListener('click', async () => {
   }
 });
 
-// "Confirmed" tracking, now scoped to the real logged-in user id (instead of
-// the old fake per-browser voter id), so it can't mix up different accounts
-// sharing the same browser.
+// "Confirmed" tracking, scoped to the real logged-in user id (instead of a
+// fake per-browser voter id), so it can't mix up different accounts sharing
+// the same browser.
 function getConfirmedSet() {
   if (!currentSession) return new Set();
   try { return new Set(JSON.parse(localStorage.getItem('civicconnect_confirmed_' + currentSession.user.id) || '[]')); }
@@ -149,6 +153,7 @@ document.querySelectorAll('nav.tabs button').forEach((btn) => {
     btn.classList.add('active');
     document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
     document.getElementById('view-' + btn.dataset.view).classList.add('active');
+    if (btn.dataset.view === 'myreports') renderMyReports();
     if (btn.dataset.view === 'authority') renderAuthority();
     if (btn.dataset.view === 'analytics') renderAnalytics();
   });
@@ -316,7 +321,7 @@ document.getElementById('btnLocate').addEventListener('click', function () {
 
 /* ---------------- Submit ---------------- */
 document.getElementById('btnSubmit').addEventListener('click', async () => {
-  // Reports must be tied to a real logged-in user (see server-side auth in Step 6).
+  // Reports must be tied to a real logged-in user (see server-side auth).
   if (!currentSession) {
     showToast('Please log in to submit a report.');
     openAuthModal('login');
@@ -364,6 +369,12 @@ document.getElementById('btnSubmit').addEventListener('click', async () => {
     resetLocationFields();
 
     await renderFeed();
+
+    // Keep "My Reports" fresh if the user happens to already be on that tab
+    // (unlikely right after a Citizen-view submit, but cheap to keep correct).
+    if (document.getElementById('view-myreports').classList.contains('active')) {
+      renderMyReports();
+    }
   } catch (err) {
     showToast('Error: ' + err.message);
   } finally {
@@ -436,6 +447,58 @@ async function renderFeed() {
       } catch (err) { showToast(err.message); }
     });
   });
+}
+
+/* ---------------- My Reports ---------------- */
+async function renderMyReports() {
+  const el = document.getElementById('myReportsFeed');
+
+  if (!currentSession) {
+    el.innerHTML = '<div class="empty">Please log in to see your reports.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="empty">Loading…</div>';
+
+  try {
+    const issues = await api('/api/issues?mine=true');
+
+    if (issues.length === 0) {
+      el.innerHTML = '<div class="empty">You haven\'t submitted any reports yet.</div>';
+      return;
+    }
+
+    el.innerHTML = issues.map((issue) => {
+      const stepIdx = TRACK_STEPS.indexOf(issue.status);
+      const track = TRACK_STEPS.map((s, i) => `
+        <div class="tstep ${i <= stepIdx ? 'on' : ''}">
+          <div class="tline"></div>
+          <div class="tdot"></div>
+          <div class="tlabel">${TRACK_LABELS[s]}</div>
+        </div>`).join('');
+      return `
+      <div class="issue">
+        <div class="issue-top">
+          <div>
+            <div class="issue-cat">${issue.category}</div>
+            <div class="issue-id">${issue.id} · ${escapeHtml(issue.ward)}</div>
+          </div>
+          <span class="stamp ${issue.status}">${TRACK_LABELS[issue.status]}</span>
+        </div>
+        <div class="issue-desc">${escapeHtml(issue.description)}</div>
+        ${issue.photoUrl ? `<img class="issue-photo" src="${issue.photoUrl}" alt="evidence">` : ''}
+        <div class="issue-meta">
+          <span class="sev ${issue.severity}"><span class="bar"></span><span class="bar"></span><span class="bar"></span>${issue.severity}</span>
+          <span class="mono">Priority ${issue.priority}</span>
+          <span class="dept-pill">${issue.department}</span>
+          <span class="mono">${issue.confirms} confirm${issue.confirms === 1 ? '' : 's'}</span>
+        </div>
+        <div class="track">${track}</div>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    el.innerHTML = `<div class="empty">Error: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 function escapeHtml(s) {
