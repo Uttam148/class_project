@@ -124,6 +124,39 @@ async function readJSON(req) {
 
 
 /* =========================================================
+   AUTH — verify the Supabase-issued access token
+========================================================= */
+
+// Reads "Authorization: Bearer <token>" and asks Supabase who it belongs to.
+// Returns the Supabase user object (real UUID in user.id) or null if missing/invalid.
+// We never trust anything the client claims about its own identity — only what
+// Supabase's own auth server confirms for this token.
+async function getAuthenticatedUser(req) {
+
+  const header = req.headers['authorization'] || '';
+
+  const match = header.match(/^Bearer\s+(.+)$/i);
+
+  if (!match) {
+    return null;
+  }
+
+  const token = match[1];
+
+  const {
+    data,
+    error
+  } = await supabase.auth.getUser(token);
+
+  if (error || !data || !data.user) {
+    return null;
+  }
+
+  return data.user;
+}
+
+
+/* =========================================================
    ISSUE → API FORMAT
 ========================================================= */
 
@@ -518,7 +551,7 @@ async function listIssues(query) {
    CREATE ISSUE + GEMINI AI
 ========================================================= */
 
-async function createIssue(body) {
+async function createIssue(body, userId) {
 
   const description =
     (body.description || '').trim();
@@ -838,11 +871,6 @@ async function createIssue(body) {
 
   if (duplicate) {
 
-    const voterId =
-      body.voterId ||
-      crypto.randomUUID();
-
-
     let confirmed = false;
 
 
@@ -856,7 +884,7 @@ async function createIssue(body) {
           duplicate.id,
 
         voter_id:
-          voterId,
+          userId,
 
         created_at:
           now
@@ -989,6 +1017,9 @@ async function createIssue(body) {
       issue_code:
         issueCode,
 
+        reporter_id:
+          userId,
+
       category:
         category,
 
@@ -1067,7 +1098,7 @@ async function createIssue(body) {
 
 async function confirmIssue(
   issueCode,
-  body
+  userId
 ) {
 
   const {
@@ -1093,11 +1124,6 @@ async function confirmIssue(
   }
 
 
-  const voterId =
-    body.voterId ||
-    crypto.randomUUID();
-
-
   const now =
     new Date().toISOString();
 
@@ -1112,7 +1138,7 @@ async function confirmIssue(
         row.id,
 
       voter_id:
-        voterId,
+        userId,
 
       created_at:
         now
@@ -1604,7 +1630,7 @@ const server =
               'GET,POST,PATCH,OPTIONS',
 
             'Access-Control-Allow-Headers':
-              'Content-Type'
+              'Content-Type, Authorization'
           }
         );
       }
@@ -1650,13 +1676,24 @@ const server =
             'POST'
         ) {
 
+          const user =
+            await getAuthenticatedUser(req);
+
+          if (!user) {
+            throw {
+              status: 401,
+              message: 'Please log in to submit a report.'
+            };
+          }
+
           const body =
             await readJSON(req);
 
 
           const result =
             await createIssue(
-              body
+              body,
+              user.id
             );
 
 
@@ -1682,16 +1719,22 @@ const server =
             'POST'
         ) {
 
-          const body =
-            await readJSON(req);
+          const user =
+            await getAuthenticatedUser(req);
 
+          if (!user) {
+            throw {
+              status: 401,
+              message: 'Please log in to confirm a report.'
+            };
+          }
 
           const result =
             await confirmIssue(
               decodeURIComponent(
                 confirmMatch[1]
               ),
-              body
+              user.id
             );
 
 
@@ -1790,6 +1833,26 @@ const server =
               statuses:
                 VALID_STATUSES
 
+            }
+          );
+        }
+
+
+        /* ---------- CONFIG (public Supabase keys for the frontend client) ---------- */
+
+        // Only ever returns the ANON key (safe to expose, protected by RLS on the
+        // client side). SUPABASE_SECRET_KEY never leaves this server.
+        if (
+          pathname === '/api/config' &&
+          req.method === 'GET'
+        ) {
+
+          return sendJSON(
+            res,
+            200,
+            {
+              supabaseUrl: process.env.SUPABASE_URL,
+              supabaseAnonKey: process.env.SUPABASE_ANON_KEY
             }
           );
         }
