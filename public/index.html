@@ -19,9 +19,14 @@
     </div>
     <nav class="tabs">
       <button data-view="citizen" class="active">Citizen</button>
+      <button data-view="myreports">My Reports</button>
       <button data-view="authority">Authority</button>
       <button data-view="analytics">Analytics</button>
     </nav>
+    <div id="authArea" style="display:flex;align-items:center;gap:10px;margin-left:auto;">
+      <!-- Filled by app.js: either a "Log in / Sign up" button, or the
+           logged-in user's email + a Logout button. -->
+    </div>
   </header>
 
   <main>
@@ -83,6 +88,17 @@
       </div>
     </section>
 
+    <!-- ============ MY REPORTS VIEW ============ -->
+    <section class="view" id="view-myreports">
+      <div class="eyebrow">Your Submissions</div>
+      <h1 class="page-title">My reports</h1>
+      <p class="page-desc">Reports you've personally submitted, and their current status.</p>
+
+      <div class="card">
+        <div id="myReportsFeed"></div>
+      </div>
+    </section>
+
     <!-- ============ AUTHORITY VIEW ============ -->
     <section class="view" id="view-authority">
       <div class="eyebrow">Municipal Dashboard</div>
@@ -130,9 +146,35 @@
     </section>
 
   </main>
+
+  <!-- ============ AUTH MODAL (Login / Signup) ============ -->
+  <!-- Hidden by default (display:none). app.js shows/hides it and wires up the
+       tab switch, form submit and error messages. Reuses .card so it matches
+       the existing visual style with no changes to styles.css. -->
+  <div id="authModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center;">
+    <div class="card" style="width:340px;max-width:90vw;">
+      <div style="display:flex;gap:10px;margin-bottom:12px;">
+        <button type="button" id="authTabLogin" class="btn-primary" style="flex:1;">Log In</button>
+        <button type="button" id="authTabSignup" style="flex:1;">Sign Up</button>
+      </div>
+
+      <div id="authError" style="color:var(--clay,#c0392b);font-size:13px;margin-bottom:8px;display:none;"></div>
+
+      <label>Email</label>
+      <input type="email" id="authEmail" autocomplete="email" placeholder="you@example.com">
+
+      <label>Password</label>
+      <input type="password" id="authPassword" autocomplete="current-password" placeholder="••••••••">
+
+      <button type="button" class="btn-primary" id="authSubmit" style="width:100%;margin-top:12px;">Log In</button>
+      <button type="button" id="authCancel" style="width:100%;margin-top:8px;">Cancel</button>
+    </div>
+  </div>
+
 </div>
 
 <div class="toast" id="toast"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

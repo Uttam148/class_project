@@ -6,29 +6,141 @@ const TRACK_LABELS = { reported: 'Reported', ai_verified: 'AI Verified', assigne
 let META = { departments: [], categories: [], statuses: [] };
 let currentPhotoDataUrl = null;
 
-// Persistent per-browser voter id so a citizen can't confirm the same issue twice
-function getVoterId() {
-  let id = localStorage.getItem('civicconnect_voter_id');
-  if (!id) {
-    id = 'voter-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
-    localStorage.setItem('civicconnect_voter_id', id);
-  }
-  return id;
+/* ================================================================
+   AUTH — Supabase client, session tracking, login/signup/logout
+================================================================ */
+
+let supabaseClient = null;
+let currentSession = null; // null when logged out, otherwise Supabase session object
+let authMode = 'login';    // 'login' | 'signup' — which tab is active in the modal
+
+async function initAuth() {
+  const config = await api('/api/config');
+  supabaseClient = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  currentSession = session;
+  renderAuthArea();
+
+  supabaseClient.auth.onAuthStateChange((_event, session) => {
+    currentSession = session;
+    renderAuthArea();
+    closeAuthModal();
+    // Re-render feeds so they reflect the now-current user
+    // (a different user may have confirmed different issues on this browser,
+    // and "My Reports" must always show the currently logged-in user's own reports).
+    renderFeed();
+    if (document.getElementById('view-myreports').classList.contains('active')) {
+      renderMyReports();
+    }
+  });
 }
+
+function renderAuthArea() {
+  const el = document.getElementById('authArea');
+  if (currentSession && currentSession.user) {
+    el.innerHTML = `
+      <span style="font-size:13px;color:var(--text-dim,#666);">${escapeHtml(currentSession.user.email)}</span>
+      <button id="btnLogout" type="button">Log Out</button>
+    `;
+    document.getElementById('btnLogout').addEventListener('click', async () => {
+      await supabaseClient.auth.signOut();
+      showToast('Logged out.');
+    });
+  } else {
+    el.innerHTML = `<button id="btnShowAuth" class="btn-primary" type="button">Log In / Sign Up</button>`;
+    document.getElementById('btnShowAuth').addEventListener('click', () => openAuthModal('login'));
+  }
+}
+
+function openAuthModal(mode) {
+  authMode = mode;
+  document.getElementById('authEmail').value = '';
+  document.getElementById('authPassword').value = '';
+  document.getElementById('authError').style.display = 'none';
+  document.getElementById('authError').textContent = '';
+  document.getElementById('authModal').style.display = 'flex';
+  updateAuthTabs();
+}
+
+function closeAuthModal() {
+  document.getElementById('authModal').style.display = 'none';
+}
+
+function updateAuthTabs() {
+  const loginTab = document.getElementById('authTabLogin');
+  const signupTab = document.getElementById('authTabSignup');
+  const submitBtn = document.getElementById('authSubmit');
+
+  if (authMode === 'login') {
+    loginTab.classList.add('btn-primary');
+    signupTab.classList.remove('btn-primary');
+    submitBtn.textContent = 'Log In';
+  } else {
+    signupTab.classList.add('btn-primary');
+    loginTab.classList.remove('btn-primary');
+    submitBtn.textContent = 'Sign Up';
+  }
+}
+
+document.getElementById('authTabLogin').addEventListener('click', () => { authMode = 'login'; updateAuthTabs(); });
+document.getElementById('authTabSignup').addEventListener('click', () => { authMode = 'signup'; updateAuthTabs(); });
+document.getElementById('authCancel').addEventListener('click', closeAuthModal);
+
+document.getElementById('authSubmit').addEventListener('click', async () => {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const errEl = document.getElementById('authError');
+  errEl.style.display = 'none';
+
+  if (!email || !password) {
+    errEl.textContent = 'Email and password are required.';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  try {
+    if (authMode === 'signup') {
+      const { error } = await supabaseClient.auth.signUp({ email, password });
+      if (error) throw error;
+      showToast('Signup successful! Check your email to confirm, then log in.');
+      closeAuthModal();
+    } else {
+      const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+      showToast('Logged in.');
+      // onAuthStateChange handles closing the modal + re-rendering
+    }
+  } catch (err) {
+    errEl.textContent = err.message;
+    errEl.style.display = 'block';
+  }
+});
+
+// "Confirmed" tracking, scoped to the real logged-in user id (instead of a
+// fake per-browser voter id), so it can't mix up different accounts sharing
+// the same browser.
 function getConfirmedSet() {
-  try { return new Set(JSON.parse(localStorage.getItem('civicconnect_confirmed') || '[]')); }
+  if (!currentSession) return new Set();
+  try { return new Set(JSON.parse(localStorage.getItem('civicconnect_confirmed_' + currentSession.user.id) || '[]')); }
   catch { return new Set(); }
 }
 function addConfirmed(issueId) {
+  if (!currentSession) return;
   const s = getConfirmedSet(); s.add(issueId);
-  localStorage.setItem('civicconnect_confirmed', JSON.stringify([...s]));
+  localStorage.setItem('civicconnect_confirmed_' + currentSession.user.id, JSON.stringify([...s]));
 }
 
+/* ================================================================
+   API helper — attaches the logged-in user's token when present
+================================================================ */
+
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
-    ...opts,
-    headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
-  });
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  if (currentSession && currentSession.access_token) {
+    headers['Authorization'] = `Bearer ${currentSession.access_token}`;
+  }
+  const res = await fetch(path, { ...opts, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || 'Request failed');
   return data;
@@ -41,6 +153,7 @@ document.querySelectorAll('nav.tabs button').forEach((btn) => {
     btn.classList.add('active');
     document.querySelectorAll('.view').forEach((v) => v.classList.remove('active'));
     document.getElementById('view-' + btn.dataset.view).classList.add('active');
+    if (btn.dataset.view === 'myreports') renderMyReports();
     if (btn.dataset.view === 'authority') renderAuthority();
     if (btn.dataset.view === 'analytics') renderAnalytics();
   });
@@ -208,6 +321,13 @@ document.getElementById('btnLocate').addEventListener('click', function () {
 
 /* ---------------- Submit ---------------- */
 document.getElementById('btnSubmit').addEventListener('click', async () => {
+  // Reports must be tied to a real logged-in user (see server-side auth).
+  if (!currentSession) {
+    showToast('Please log in to submit a report.');
+    openAuthModal('login');
+    return;
+  }
+
   const description = document.getElementById('inDesc').value.trim();
   const category = document.getElementById('inCategory').value;
   const locationName = document.getElementById('inLocation').value.trim();
@@ -229,7 +349,7 @@ document.getElementById('btnSubmit').addEventListener('click', async () => {
   try {
     const result = await api('/api/issues', {
       method: 'POST',
-      body: JSON.stringify({ description, category, location: locationName, photo: currentPhotoDataUrl, voterId: getVoterId() }),
+      body: JSON.stringify({ description, category, location: locationName, photo: currentPhotoDataUrl }),
     });
 
     await animateStep(1, result.pipeline.classification);
@@ -249,6 +369,12 @@ document.getElementById('btnSubmit').addEventListener('click', async () => {
     resetLocationFields();
 
     await renderFeed();
+
+    // Keep "My Reports" fresh if the user happens to already be on that tab
+    // (unlikely right after a Citizen-view submit, but cheap to keep correct).
+    if (document.getElementById('view-myreports').classList.contains('active')) {
+      renderMyReports();
+    }
   } catch (err) {
     showToast('Error: ' + err.message);
   } finally {
@@ -305,9 +431,15 @@ async function renderFeed() {
 
   el.querySelectorAll('.upvote:not(.voted)').forEach((btn) => {
     btn.addEventListener('click', async () => {
+      // Confirmations must also be tied to a real logged-in user.
+      if (!currentSession) {
+        showToast('Please log in to confirm a report.');
+        openAuthModal('login');
+        return;
+      }
       try {
         const updated = await api(`/api/issues/${encodeURIComponent(btn.dataset.id)}/confirm`, {
-          method: 'POST', body: JSON.stringify({ voterId: getVoterId() }),
+          method: 'POST', body: JSON.stringify({}),
         });
         addConfirmed(updated.id);
         showToast(`Confirmed ${updated.id} — priority recalculated to ${updated.priority}.`);
@@ -315,6 +447,58 @@ async function renderFeed() {
       } catch (err) { showToast(err.message); }
     });
   });
+}
+
+/* ---------------- My Reports ---------------- */
+async function renderMyReports() {
+  const el = document.getElementById('myReportsFeed');
+
+  if (!currentSession) {
+    el.innerHTML = '<div class="empty">Please log in to see your reports.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="empty">Loading…</div>';
+
+  try {
+    const issues = await api('/api/issues?mine=true');
+
+    if (issues.length === 0) {
+      el.innerHTML = '<div class="empty">You haven\'t submitted any reports yet.</div>';
+      return;
+    }
+
+    el.innerHTML = issues.map((issue) => {
+      const stepIdx = TRACK_STEPS.indexOf(issue.status);
+      const track = TRACK_STEPS.map((s, i) => `
+        <div class="tstep ${i <= stepIdx ? 'on' : ''}">
+          <div class="tline"></div>
+          <div class="tdot"></div>
+          <div class="tlabel">${TRACK_LABELS[s]}</div>
+        </div>`).join('');
+      return `
+      <div class="issue">
+        <div class="issue-top">
+          <div>
+            <div class="issue-cat">${issue.category}</div>
+            <div class="issue-id">${issue.id} · ${escapeHtml(issue.ward)}</div>
+          </div>
+          <span class="stamp ${issue.status}">${TRACK_LABELS[issue.status]}</span>
+        </div>
+        <div class="issue-desc">${escapeHtml(issue.description)}</div>
+        ${issue.photoUrl ? `<img class="issue-photo" src="${issue.photoUrl}" alt="evidence">` : ''}
+        <div class="issue-meta">
+          <span class="sev ${issue.severity}"><span class="bar"></span><span class="bar"></span><span class="bar"></span>${issue.severity}</span>
+          <span class="mono">Priority ${issue.priority}</span>
+          <span class="dept-pill">${issue.department}</span>
+          <span class="mono">${issue.confirms} confirm${issue.confirms === 1 ? '' : 's'}</span>
+        </div>
+        <div class="track">${track}</div>
+      </div>`;
+    }).join('');
+  } catch (err) {
+    el.innerHTML = `<div class="empty">Error: ${escapeHtml(err.message)}</div>`;
+  }
 }
 
 function escapeHtml(s) {
@@ -412,6 +596,7 @@ function showToast(msg) {
 
 /* ---------------- Boot ---------------- */
 (async function init() {
+  await initAuth();
   await loadMeta();
   await renderFeed();
 })();
