@@ -11,7 +11,7 @@ jobs:
 
     environment:
       name: Production
-      url: https://class-project-vi2a.onrender.com
+      url: https://class-project-via2.onrender.com
 
     steps:
       - name: Trigger Render deployment
