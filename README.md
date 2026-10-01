@@ -98,3 +98,4 @@ Delete `civicconnect.db` and restart the server — it will re-seed automaticall
   (the schema is deliberately simple to make this migration easy).
 - Deploy: any host that runs Node 22+ works (Render, Railway, a VPS). Since
   there are no native npm modules, there's nothing to compile on deploy.
+ Production deployment updated.
