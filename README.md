@@ -42,6 +42,3 @@ public/       Frontend
 uploads/      Uploaded photos
 ```
 
-## Team
-
-Built by a team of three for SIH 2026.
